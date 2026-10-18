@@ -1,0 +1,267 @@
+name: corpus
+
+# The corpus run (doc/cli-tests.md, "Corpus run") as a workflow of its own:
+# a manual run of the CI workflow would also build the standalone
+# executables (up to an hour each), and the corpus run is wanted alone --
+# before a release, or after a change to the comparison itself. It is
+# started from the Actions tab ("Run workflow"), optionally for one OS.
+# 20-30 min per OS, plus a 150 MB corpus download the first time.
+#
+# The job body is cli-golden's setup (ci.yml) plus the corpus steps; keep
+# the two in step when the setup changes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "runner OS (all, ubuntu-latest, macos-latest, windows-latest)"
+        type: choice
+        default: all
+        options: [all, ubuntu-latest, macos-latest, windows-latest]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Corpus run (doc/cli-tests.md, "Corpus run"): the golden mechanics over
+  # Phil Harvey's sample images (one archive per manufacturer, fetched from
+  # exiftool.org and never committed). Perl builds the reference, runs
+  # against it (must be 100%), and lexiftool runs against it: green means
+  # identical apart from the exactly recorded known deviations
+  # (src/test-cli/CorpusReport.lua, KNOWN). The archives are cached, keyed
+  # on the page's own table (manifest.txt), so a run downloads only when
+  # the corpus changed upstream. The setup per OS is cli-golden's.
+  corpus:
+    name: corpus (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os == 'all' && '["ubuntu-latest", "macos-latest", "windows-latest"]' || format('["{0}"]', inputs.os)) }}
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+
+    steps:
+      - name: disable autocrlf (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: install optional Perl modules (Windows)
+        if: runner.os == 'Windows'
+        # As in cli-golden: before msvc-dev-cmd, under cmd, Strawberry's Perl
+        # named explicitly (and recorded as the reference Perl).
+        shell: cmd
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          C:\Strawberry\perl\bin\perl.exe C:\Strawberry\perl\bin\cpanm --notest Win32::API IO::Compress::Brotli || (type %USERPROFILE%\.cpanm\build.log & exit /b 1)
+          echo TEST_CLI_PERL=C:/Strawberry/perl/bin/perl.exe>> %GITHUB_ENV%
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      - name: remove conflicting Git link.exe (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: rm -f "/usr/bin/link.exe"
+
+      - name: install GNU make (Windows)
+        if: runner.os == 'Windows'
+        run: choco install make --no-progress -y
+
+      - name: install C libraries and optional Perl modules (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libpcre2-dev libbrotli-dev zlib1g-dev perl cpanminus \
+            libarchive-zip-perl libterm-readkey-perl
+          # The same full-install feature set as in cli-golden.
+          sudo cpanm --notest File::StatX IO::Compress::Brotli
+
+      - name: install C libraries and Perl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install pcre2 brotli perl cpanminus
+          echo "PCRE2_DIR=$(brew --prefix pcre2)" >> "$GITHUB_ENV"
+          echo "BROTLI_DIR=$(brew --prefix brotli)" >> "$GITHUB_ENV"
+          # As in cli-golden: a Homebrew Perl for the ctime interposer, with
+          # the optional modules.
+          echo "TEST_CLI_PERL=$(brew --prefix perl)/bin/perl" >> "$GITHUB_ENV"
+          cpanm --notest Archive::Zip Term::ReadKey
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)" cpanm --notest Net::SSLeay
+          BROTLI_INCLUDE="$(brew --prefix brotli)/include" BROTLI_LIB="$(brew --prefix brotli)/lib" \
+            cpanm --notest IO::Compress::Brotli
+
+      - name: install C libraries (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install pcre2:x64-windows brotli:x64-windows zlib:x64-windows
+          echo "PCRE2_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "BROTLI_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "ZLIB_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> "$GITHUB_PATH"
+          cp "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib/z.lib" \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib/zlib.lib"
+
+      - name: install Lua 5.5
+        uses: luarocks/gh-actions-lua@v14
+        with:
+          luaVersion: "5.5"
+
+      - uses: luarocks/gh-actions-luarocks@v7
+
+      - name: install Lua rocks (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          luarocks install carray
+          if [ -n "$PCRE2_DIR" ]; then
+            luarocks install lpcre PCRE2_DIR="$PCRE2_DIR"
+          else
+            luarocks install lpcre
+          fi
+          if [ -n "$BROTLI_DIR" ]; then
+            luarocks install lbrotli BROTLIDEC_DIR="$BROTLI_DIR" BROTLIENC_DIR="$BROTLI_DIR"
+          else
+            luarocks install lbrotli
+          fi
+          luarocks install luafilesystem
+          luarocks install digest
+          luarocks install lua-zlib
+
+      - name: install Lua rocks (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          luarocks install carray
+          luarocks install lpcre PCRE2_DIR="$PCRE2_DIR"
+          luarocks install lbrotli BROTLIDEC_DIR="$BROTLI_DIR" BROTLIENC_DIR="$BROTLI_DIR"
+          luarocks install luafilesystem
+          luarocks install digest
+          luarocks install lua-zlib ZLIB_DIR="$ZLIB_DIR"
+
+      - name: build the port (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          make sys5.5 LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+          make bytecode5.5 LUAC5_5="$(command -v luac5.5 || command -v luac)"
+
+      - name: build the port (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: luarocks make rockspecs/lexiftool-scm-0.rockspec
+
+      - name: read the corpus manifest
+        # The page's table alone (no archives): the cache key below.
+        shell: bash
+        run: sh tools/fetch_corpus.sh --manifest-only vendor/exiftool-samples
+
+      - name: restore the corpus archives
+        uses: actions/cache@v4
+        with:
+          path: vendor/exiftool-samples/archives
+          key: corpus-${{ runner.os }}-${{ hashFiles('vendor/exiftool-samples/manifest.txt') }}
+
+      - name: fetch the corpus
+        # Downloads only what the cache did not bring, then unpacks.
+        shell: bash
+        run: make corpus-fetch
+
+      - name: build the Perl reference tree
+        shell: bash
+        run: |
+          set -e
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            LUA_BIN=$(cygpath -m "$LUA_BIN")   # Windows path with forward slashes: survives the Makefile's shell
+          fi
+          make test-corpus-gen \
+            TEST_CLI_LUA="$LUA_BIN" \
+            TEST_CLI_ROCKS_VER=5.5 \
+            TEST_CORPUS_JOBS=auto \
+            TEST_CLI_LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)" \
+            TEST_CLI_LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)" \
+            LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+
+      - name: Perl against its own reference (must be 100%)
+        shell: bash
+        run: |
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            LUA_BIN=$(cygpath -m "$LUA_BIN")   # Windows path with forward slashes: survives the Makefile's shell
+          fi
+          make test-corpus-perl \
+            TEST_CLI_LUA="$LUA_BIN" \
+            TEST_CLI_ROCKS_VER=5.5 \
+            TEST_CORPUS_JOBS=auto \
+            TEST_CLI_LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)" \
+            TEST_CLI_LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)" \
+            LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+
+      - name: lexiftool against the reference (only known deviations)
+        # Any deviation beyond the exactly recorded known ones fails this
+        # step (TEST_CORPUS_EXPECT_IDENTICAL); summary.md in the artifact
+        # names the cases and the module each one is blamed on.
+        shell: bash
+        run: |
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            LUA_BIN=$(cygpath -m "$LUA_BIN")   # Windows path with forward slashes: survives the Makefile's shell
+          fi
+          make test-corpus-lua \
+            TEST_CORPUS_EXPECT_IDENTICAL=1 \
+            TEST_CLI_LUA="$LUA_BIN" \
+            LUAC5_5="$(command -v luac5.5 || command -v luac)" \
+            TEST_CLI_ROCKS_VER=5.5 \
+            TEST_CORPUS_JOBS=auto \
+            TEST_CLI_LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)" \
+            TEST_CLI_LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)" \
+            LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+
+      - name: collect the differences
+        # As in cli-golden: the first lines of each differing case's diff,
+        # without the trees (too large to keep).
+        if: always()
+        shell: bash
+        run: |
+          if [ -f test-corpus-out/failures.txt ]; then
+            cut -f5 test-corpus-out/failures.txt | sort -u | while read -r c; do
+              echo "=== $c"
+              # diff exits 1 for "differs", the expected case here; 2 (a
+              # missing tree) is a real error and fails the step. The output
+              # goes to a file first: cutting a pipe with head would kill diff
+              # with SIGPIPE and fail the step under pipefail.
+              rc=0
+              diff -r "test-corpus-ref/$c" "test-corpus-out/$c" > test-corpus-out/.diff || rc=$?
+              [ "$rc" -le 1 ] || exit "$rc"
+              head -40 test-corpus-out/.diff
+            done > test-corpus-out/diffs.txt
+            rm -f test-corpus-out/.diff
+          fi
+
+      - name: upload the corpus report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            test-corpus-out/summary.md
+            test-corpus-out/summary.txt
+            test-corpus-out/failures.txt
+            test-corpus-out/diffs.txt
+            build/test-corpus/worker-*.err
+          if-no-files-found: warn

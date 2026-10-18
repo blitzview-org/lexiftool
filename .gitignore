@@ -1,0 +1,21 @@
+# build outputs: C modules, bytecode cache, generated documentation
+/build/
+*.luac
+*.so
+*.o
+.luarocks/
+
+# CLI golden test trees (see doc/cli-tests.md)
+/test-cli-ref/
+/test-cli-out/
+
+# corpus run trees and the corpus itself, fetched by tools/fetch_corpus.sh
+# and never committed (see doc/cli-tests.md, "Corpus run")
+/test-corpus-ref/
+/test-corpus-out/
+/vendor/exiftool-samples
+
+# leftovers of failed test runs (see src/test/TestLib.lua)
+src/test/*.failed
+src/test/*_failed.*
+src/test/*.tmp
