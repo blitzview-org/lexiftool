@@ -1,0 +1,13 @@
+## Source archive contents (git archive / GitHub release tarballs)
+##
+## vendor/exiftool is a git submodule (see .gitmodules); `git archive` never
+## descends into submodule content, so an archive contains only this
+## repository's own files plus an empty vendor/exiftool/ directory. The test
+## suite and the parity tools need that checkout and are left out of the
+## archive; the library itself is self-contained (src/lexiftool/Geolocation.dat
+## is a verbatim copy of the vendored database, see LICENSE-THIRD-PARTY).
+
+src/test export-ignore
+src/runtests.lua export-ignore
+tools export-ignore
+standalone export-ignore

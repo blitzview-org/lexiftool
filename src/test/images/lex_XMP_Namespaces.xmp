@@ -1,0 +1,16 @@
+<?xpacket begin='' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<x:xmpmeta xmlns:x='adobe:ns:meta/'>
+<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+ <rdf:Description rdf:about='' xmlns:dc='http://purl.org/dc/elements/1.1/'>
+  <dc:format>image/jpeg</dc:format>
+ </rdf:Description>
+ <rdf:Description rdf:about=''>
+  <dc:creator><rdf:Seq><rdf:li>Me</rdf:li></rdf:Seq></dc:creator>
+  <foo:Bar>x</foo:Bar>
+  <foo:Baz>y</foo:Baz>
+  <xmp:Rating xml:lang='en'>3</xmp:Rating>
+ </rdf:Description>
+ <rdf:Description rdf:about='' xmlns:xmp='http://ns.adobe.com/xap/1.0/' xmp:Label='a' tiff:Make='b'/>
+</rdf:RDF>
+</x:xmpmeta>
+<?xpacket end='w'?>

@@ -1,0 +1,800 @@
+name: CI
+
+# One workflow for everything, so the Actions tab shows a single entry per
+# run instead of four unrelated ones (the corpus run alone has its own
+# workflow, corpus.yml: manual, 20-30 min per OS):
+#
+#   lint             luacheck, hosted on its own Lua 5.1 (see below)
+#   test             Lua 5.5 test suite + structural verify, per OS
+#   cli-golden       CLI comparison against Perl exiftool, per OS
+#   standalone       standalone executables (linux, macos, windows), matrix
+#   macos-smoke      runs the built macOS universal binary on a macOS runner
+#   windows-smoke    runs the built Windows executable on a Windows runner
+#
+# Push to master and manual runs do everything; pull requests run lint +
+# test only (the standalone builds and the CLI reference runs are expensive
+# and are not a PR gate). A v* tag builds and publishes the standalone
+# releases only: the tagged commit has already been checked by its master
+# run, and a release should not wait for the test matrix.
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only by default; only the standalone job needs to write (release
+# assets on v* tags).
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded runs, like the old standalone-* workflows did. A tag
+  # run is never cancelled: a release upload may be in progress.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+# Single Lua version by policy: Lua 5.5 only, no version matrix (unlike the
+# lua-lpcre/lua-compress reference workflows, which test every Lua version).
+# OS matrix only. `make check` itself (sys + test + lint + verify) always
+# targets both Lua 5.4 *and* 5.5 -- that is hardcoded in the Makefile, which
+# this workflow must not edit -- so `make check` cannot be called as-is
+# without also installing Lua 5.4. Instead the test job calls the 5.5-only
+# pieces directly (`make sys5.5`, `make test5.5`, and the seven
+# `tools/verify_*.lua` scripts that `make verify` would otherwise run via
+# Lua 5.4), reproducing the same quality gate under Lua 5.5 alone.
+#
+# `lint` (luacheck, hosted on its own Lua 5.1 -- see below) is a separate
+# job, not a step of `test`: luarocks/gh-actions-lua installs every Lua
+# version into the same fixed ./.lua (symlinked to its per-version
+# tool-cache directory only the first time that path doesn't exist yet), so
+# installing two Lua versions in one job leaves the second one's luarocks
+# -- and everything built against it, including lexiftool.sys -- silently
+# pointed at the first version's headers. One Lua version per job sidesteps
+# that; it also means the 5.1 install (for luacheck) only runs once instead
+# of once per OS in the test matrix.
+
+jobs:
+  lint:
+    name: lint
+    # See the workflow header: a v* tag builds the releases only.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        # no submodules: luacheck only looks at src/, not vendor/exiftool
+
+      # luacheck's current luarocks release (1.2.0) cannot be *run* under a
+      # genuine Lua 5.5 interpreter: luacheck/standards.lua reassigns a
+      # generic-for loop variable (`field_name = field_def`), and Lua 5.5
+      # made for-in loop variables implicitly <const> -- verified locally:
+      # "attempt to assign to const variable 'field_name'". This is a bug in
+      # luacheck under 5.5, not in this project. Until upstream fixes it, the
+      # linter is hosted on its own Lua 5.1 (verified clean: 0 warnings/0
+      # errors on this codebase); everything project-related runs under Lua
+      # 5.5 instead, in the `test` job below.
+      - name: install Lua 5.1 (luacheck host only, see above)
+        uses: luarocks/gh-actions-lua@v14
+        with:
+          luaVersion: "5.1"
+
+      - uses: luarocks/gh-actions-luarocks@v7
+
+      - name: install luacheck
+        run: luarocks install luacheck
+
+      - name: lint
+        run: luacheck src
+
+  test:
+    name: test (${{ matrix.os }})
+    # See the workflow header: a v* tag builds the releases only.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    steps:
+      - name: disable autocrlf (Windows)
+        # windows-latest's git defaults to core.autocrlf=true, rewriting
+        # LF to CRLF in every text file it checks out (including inside
+        # the vendor/exiftool submodule) -- actions/checkout does not
+        # touch this itself. Several vendored test fixtures are newline-
+        # or byte-sensitive (e.g. t/images/Text1.txt, whose expected
+        # output literally is "Newlines: Unix LF"), so this must be unset
+        # before the checkout below, not after.
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true   # vendor/exiftool/t: test images/.out + the Perl
+                             # original that `make verify` compares against
+
+      - uses: ./.github/actions/msvc-dev-env
+        if: runner.os == 'Windows'
+
+      - name: remove conflicting Git link.exe (Windows)
+        # Git for Windows ships a coreutils "link" (hardlink tool) in usr/bin
+        # that shadows MSVC's link.exe under the bash shell used below.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: rm -f "/usr/bin/link.exe"
+
+      - name: install GNU make (Windows)
+        # windows-latest has no POSIX make by default, and the project's
+        # Makefile (locked, not edited here) is written against GNU make.
+        # If choco cannot provide it, this is meant to fail loudly here
+        # rather than have a later step silently do nothing.
+        if: runner.os == 'Windows'
+        run: choco install make --no-progress -y
+
+      - name: install C libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libpcre2-dev libbrotli-dev zlib1g-dev liblzma-dev libbz2-dev perl locales
+          # the unit tests run under de_DE (src/runtests.lua): decimal comma
+          # and a collation of its own; macOS ships it, Windows' UCRT knows
+          # it as de-DE. de_DE (ISO-8859-1) is the single-byte run below.
+          sudo locale-gen de_DE.UTF-8 de_DE
+
+      - name: install C libraries (macOS)
+        # perl ships with macOS already; zlib comes from Homebrew (below).
+        if: runner.os == 'macOS'
+        run: |
+          brew install pcre2 brotli zlib xz bzip2
+          echo "PCRE2_DIR=$(brew --prefix pcre2)" >> "$GITHUB_ENV"
+          echo "BROTLI_DIR=$(brew --prefix brotli)" >> "$GITHUB_ENV"
+          # compress.zlib against Homebrew's current zlib rather than the
+          # SDK's older one (Perl's Compress::Raw::Zlib bundles a current
+          # zlib), for byte-identical deflate output
+          echo "ZLIB_DIR=$(brew --prefix zlib)" >> "$GITHUB_ENV"
+          # compress.lzma/compress.bzip2: liblzma and libbz2 from Homebrew
+          # (bzip2 is keg-only there)
+          echo "LZMA_DIR=$(brew --prefix xz)" >> "$GITHUB_ENV"
+          echo "BZIP2_DIR=$(brew --prefix bzip2)" >> "$GITHUB_ENV"
+
+      - name: install C libraries (Windows)
+        # Perl ships with windows-latest (Strawberry Perl) for `make verify`.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install pcre2:x64-windows brotli:x64-windows zlib:x64-windows liblzma:x64-windows bzip2:x64-windows
+          echo "PCRE2_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "BROTLI_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "ZLIB_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "LZMA_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "BZIP2_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> "$GITHUB_PATH"
+          # zlib's own CMakeLists.txt (which this vcpkg port's portfile.cmake
+          # just calls through) names the Windows import library "z.lib"
+          # (OUTPUT_NAME z), but the compress.zlib rockspec links "zlib.lib"
+          # for the windows platform -- copy it under the name the rockspec
+          # looks for.
+          cp "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib/z.lib" \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib/zlib.lib"
+          # the compress.lzma rockspec links lzma.lib, the import library of
+          # XZ Utils 5.6.3 and later; older vcpkg ports name it liblzma.lib
+          lib="$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib"
+          if [ ! -f "$lib/lzma.lib" ] && [ -f "$lib/liblzma.lib" ]; then
+            cp "$lib/liblzma.lib" "$lib/lzma.lib"
+          fi
+
+
+      - name: Compress::Raw::Lzma for the reference Perl (Windows)
+        if: runner.os == 'Windows'
+        # After the vcpkg step: Strawberry's gcc has no liblzma, so the module
+        # is built against vcpkg's lzma.h and liblzma.dll, through a gcc import
+        # library made with Strawberry's gendef/dlltool (MakeMaker's Liblist
+        # looks for liblzma.a / liblzma.dll.a). The DLL is on PATH
+        # (GITHUB_PATH above) when the reference runs. Under cmd with
+        # Strawberry's toolchain first, as for the other Perl modules.
+        shell: cmd
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          set PATH=C:\Strawberry\c\bin;C:\Strawberry\perl\site\bin;C:\Strawberry\perl\bin;%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin;%PATH%
+          set LIBLZMA_INCLUDE=%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\include
+          mkdir %RUNNER_TEMP%\lzma-gcc
+          cd /d %RUNNER_TEMP%\lzma-gcc
+          gendef %VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin\liblzma.dll || exit /b 1
+          dlltool -d liblzma.def -D liblzma.dll -l liblzma.dll.a || exit /b 1
+          copy liblzma.dll.a liblzma.a
+          set LIBLZMA_LIB=%RUNNER_TEMP%\lzma-gcc
+          C:\Strawberry\perl\bin\perl.exe C:\Strawberry\perl\bin\cpanm --notest Compress::Raw::Lzma || (type %USERPROFILE%\.cpanm\build.log & exit /b 1)
+          C:\Strawberry\perl\bin\perl.exe -MCompress::Raw::Lzma -e "print Compress::Raw::Lzma::lzma_version_string(), qq(\n)"
+      - name: install Lua 5.5 (the project's only supported version)
+        uses: luarocks/gh-actions-lua@v14
+        with:
+          luaVersion: "5.5"
+
+      - uses: luarocks/gh-actions-luarocks@v7
+
+      - name: install Lua rocks (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          luarocks install carray
+          if [ -n "$PCRE2_DIR" ]; then
+            luarocks install lpcre PCRE2_DIR="$PCRE2_DIR"
+          else
+            luarocks install lpcre
+          fi
+          if [ -n "$BROTLI_DIR" ]; then
+            luarocks install compress.brotli BROTLIDEC_DIR="$BROTLI_DIR" BROTLIENC_DIR="$BROTLI_DIR"
+          else
+            luarocks install compress.brotli
+          fi
+          luarocks install luafilesystem
+          luarocks install digest
+          luarocks install cipher.aes
+          luarocks install cipher.rc4
+          if [ -n "$ZLIB_DIR" ]; then
+            luarocks install compress.zlib ZLIB_DIR="$ZLIB_DIR"
+          else
+            luarocks install compress.zlib
+          fi
+          if [ -n "$LZMA_DIR" ]; then
+            luarocks install compress.lzma LZMA_DIR="$LZMA_DIR"
+          else
+            luarocks install compress.lzma
+          fi
+          if [ -n "$BZIP2_DIR" ]; then
+            luarocks install compress.bzip2 BZIP2_DIR="$BZIP2_DIR"
+          else
+            luarocks install compress.bzip2
+          fi
+
+      - name: install Lua rocks (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          luarocks install carray
+          luarocks install lpcre PCRE2_DIR="$PCRE2_DIR"
+          luarocks install compress.brotli BROTLIDEC_DIR="$BROTLI_DIR" BROTLIENC_DIR="$BROTLI_DIR"
+          luarocks install luafilesystem
+          luarocks install digest
+          luarocks install cipher.aes
+          luarocks install cipher.rc4
+          luarocks install compress.zlib ZLIB_DIR="$ZLIB_DIR"
+          luarocks install compress.lzma LZMA_DIR="$LZMA_DIR"
+          luarocks install compress.bzip2 BZIP2_DIR="$BZIP2_DIR"
+
+      - name: build lexiftool.sys (Linux/macOS)
+        # `make sys` (and `make check`) also target Lua 5.4 -- not installed
+        # here on purpose (Lua 5.5 only) -- so only the 5.5 target is built.
+        # LUA_INCDIR_5.5 comes from luarocks' own config instead of guessing
+        # pkg-config names or standard include directories, since gh-actions-lua
+        # does not install into any of those.
+        if: runner.os != 'Windows'
+        shell: bash
+        run: make sys5.5 LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+
+      - name: build lexiftool (Windows)
+        # The Makefile's sys5.5 pattern rule drives $(CC)/pkg-config directly,
+        # which is brittle to reproduce for MSVC from git-bash. `luarocks make`
+        # is the build path the rockspec itself defines (sys.c plus all Lua
+        # modules) and already knows how to find the Lua headers/libs that
+        # gh-actions-luarocks configured it for.
+        if: runner.os == 'Windows'
+        shell: bash
+        run: luarocks make rockspecs/lexiftool-scm-0.rockspec
+
+      - name: test
+        # Equivalent to `make test5.5`, but LUA_PATH/LUA_CPATH are built from
+        # `luarocks path` instead of the Makefile's LUA_ROCKS guess
+        # ($HOME/.luarocks): gh-actions-lua/gh-actions-luarocks may install
+        # the rocks tree elsewhere, especially on Windows. The Lua binary
+        # name is also not assumed: distro packages call it lua5.5, but
+        # gh-actions-lua's own from-source builds expose plain `lua`
+        # (lua.exe on Windows). The runner sets a de_DE locale itself (the
+        # first of de_DE.UTF-8, de_DE.utf8, de-DE, German_Germany.1252 the C
+        # library accepts; on Windows German_Germany.1252 comes first, so
+        # that run covers a single-byte LC_CTYPE) and reports it in its
+        # first line;
+        # LEXIFTOOL_TEST_LOCALE_REQUIRED (= make's TEST_LOCALE_REQUIRED=1)
+        # makes a missing one fail the job instead of running under "C".
+        # LEXIFTOOL_TEST_PERL (= make's TEST_PERL) names the Perl whose
+        # localtime/gmtime the facade's are compared with: on Windows
+        # Strawberry Perl, the native build -- the perl on Git Bash's PATH
+        # is an msys one, with a localtime range of its own.
+        shell: bash
+        run: |
+          set -e
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          export LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)"
+          export LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)"
+          unset LUA_PATH_5_5 LUA_CPATH_5_5
+          TEST_PERL=perl
+          if [ "$RUNNER_OS" = Windows ]; then TEST_PERL=C:/Strawberry/perl/bin/perl.exe; fi
+          "$LUA_BIN" -e "LEXIFTOOL_TEST_LOCALE_REQUIRED=1" -e "LEXIFTOOL_TEST_PERL='$TEST_PERL'" src/runtests.lua
+
+      - name: test (single-byte locale)
+        # The suite once more under glibc's de_DE (ISO-8859-1), where Lua's
+        # pattern classes (%a, %w, ...) and string.lower/upper take 0xE4 for
+        # a letter -- the case Windows covers with cp1252. macOS stays UTF-8.
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          export LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)"
+          export LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)"
+          unset LUA_PATH_5_5 LUA_CPATH_5_5
+          "$LUA_BIN" -e "LEXIFTOOL_TEST_LOCALE='de_DE'" -e "LEXIFTOOL_TEST_LOCALE_REQUIRED=1" src/runtests.lua
+
+      - name: verify (structural parity vs vendor/exiftool)
+        # Same LUA_PATH/LUA_CPATH construction as the test step above, run
+        # under Lua 5.5 instead of `make verify`'s hardcoded Lua 5.4.
+        shell: bash
+        run: |
+          set -e
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          export LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)"
+          export LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)"
+          unset LUA_PATH_5_5 LUA_CPATH_5_5
+          "$LUA_BIN" tools/verify_port.lua
+          "$LUA_BIN" tools/verify_structure.lua
+          "$LUA_BIN" tools/verify_procs.lua
+          "$LUA_BIN" tools/verify_sprintf.lua
+          "$LUA_BIN" tools/verify_sort.lua
+          "$LUA_BIN" tools/verify_matchbool.lua
+          "$LUA_BIN" tools/verify_tostring.lua
+          "$LUA_BIN" tools/verify_ctype.lua
+
+  # CLI golden comparison: the Perl original builds the reference tree, then
+  # runs against it (must be 100% -- this validates the harness and its
+  # determinism), and lexiftool runs against the same tree (must be 100% as
+  # well: the port is held to the original on every platform). The
+  # reference is generated per OS and never committed: paths, locale, birth
+  # times and ctime all differ between platforms, so "determinism is created,
+  # not normalised" (src/test-cli/Driver.lua).
+  cli-golden:
+    name: cli-golden (${{ matrix.os }})
+    # See the workflow header: the reference run is too expensive for every
+    # PR, and a v* tag builds the releases only.
+    if: ${{ github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+
+    steps:
+      - name: disable autocrlf (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: install optional Perl modules (Windows)
+        if: runner.os == 'Windows'
+        # Before msvc-dev-env: with MSVC's cl in the environment, CMake built
+        # brotli as .lib files while IO::Compress::Brotli's Makefile.PL links
+        # the MinGW .a names. Strawberry's own gcc is what both expect.
+        # Under cmd, not bash: the generated makefile runs pl2bat.bat (a
+        # batch file) for the module's helper script, which only cmd can
+        # execute. Strawberry's Perl is named explicitly, since Git Bash's
+        # msys Perl would otherwise come first in PATH.
+        shell: cmd
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          C:\Strawberry\perl\bin\perl.exe C:\Strawberry\perl\bin\cpanm --notest Win32::API IO::Compress::Brotli Unicode::LineBreak || (type %USERPROFILE%\.cpanm\build.log & exit /b 1)
+          rem The reference must be built by Strawberry's Perl, not by the msys
+          rem Perl that Git Bash puts first in PATH: that one reports as a
+          rem POSIX system ($^O eq 'msys', FileInodeChangeDate, rwx modes).
+          echo TEST_CLI_PERL=C:/Strawberry/perl/bin/perl.exe>> %GITHUB_ENV%
+
+      - uses: ./.github/actions/msvc-dev-env
+        if: runner.os == 'Windows'
+
+      - name: remove conflicting Git link.exe (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: rm -f "/usr/bin/link.exe"
+
+      - name: install GNU make (Windows)
+        if: runner.os == 'Windows'
+        run: choco install make --no-progress -y
+
+      - name: install C libraries and optional Perl modules (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential libpcre2-dev libbrotli-dev zlib1g-dev liblzma-dev libbz2-dev perl cpanminus \
+            libarchive-zip-perl libterm-readkey-perl libcompress-raw-lzma-perl
+          # The reference must have the feature set of a full exiftool install:
+          # lexiftool has native counterparts for these optional modules, so
+          # without them every ZIP, Brotli (JXL), encoded 7z header (LZMA)
+          # and -k case differs, and ExifTool only reports FileCreateDate on
+          # Linux with File::StatX. Unicode::LineBreak (from CPAN, with its
+          # bundled character data) aligns the -lang output by display
+          # width, as lexiftool always does.
+          sudo cpanm --notest File::StatX IO::Compress::Brotli Unicode::LineBreak
+
+      - name: install C libraries and Perl (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install pcre2 brotli zlib xz bzip2 perl cpanminus
+          echo "PCRE2_DIR=$(brew --prefix pcre2)" >> "$GITHUB_ENV"
+          echo "BROTLI_DIR=$(brew --prefix brotli)" >> "$GITHUB_ENV"
+          # compress.zlib against Homebrew's current zlib rather than the
+          # SDK's older one (Perl's Compress::Raw::Zlib bundles a current
+          # zlib), for byte-identical deflate output
+          echo "ZLIB_DIR=$(brew --prefix zlib)" >> "$GITHUB_ENV"
+          # compress.lzma/compress.bzip2: liblzma and libbz2 from Homebrew
+          # (bzip2 is keg-only there)
+          echo "LZMA_DIR=$(brew --prefix xz)" >> "$GITHUB_ENV"
+          echo "BZIP2_DIR=$(brew --prefix bzip2)" >> "$GITHUB_ENV"
+          # SIP strips DYLD_* from /usr/bin/perl, so the ctime interposer needs
+          # a Homebrew Perl (see tools/ctime_fake_darwin.c); cpanm then adds
+          # the optional modules below to it.
+          echo "TEST_CLI_PERL=$(brew --prefix perl)/bin/perl" >> "$GITHUB_ENV"
+          # Same optional modules as on Linux (Homebrew's cpanm belongs to
+          # Homebrew's Perl); File::StatX is Linux-only.
+          cpanm --notest Archive::Zip Term::ReadKey Unicode::LineBreak
+          # IO::Compress::Brotli drags in Alien::cmake3 -> Alien::Build ->
+          # IO::Socket::SSL -> Net::SSLeay, which needs to be told where
+          # Homebrew's OpenSSL is; brotli itself comes from Homebrew.
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)" cpanm --notest Net::SSLeay
+          BROTLI_INCLUDE="$(brew --prefix brotli)/include" BROTLI_LIB="$(brew --prefix brotli)/lib" \
+            cpanm --notest IO::Compress::Brotli
+          # Compress::Raw::Lzma (encoded 7z headers) against Homebrew's xz
+          LIBLZMA_INCLUDE="$(brew --prefix xz)/include" LIBLZMA_LIB="$(brew --prefix xz)/lib" \
+            cpanm --notest Compress::Raw::Lzma
+
+      - name: install C libraries (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vcpkg install pcre2:x64-windows brotli:x64-windows zlib:x64-windows liblzma:x64-windows bzip2:x64-windows
+          echo "PCRE2_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "BROTLI_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "ZLIB_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "LZMA_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "BZIP2_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> "$GITHUB_PATH"
+          cp "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib/z.lib" \
+             "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib/zlib.lib"
+          # the compress.lzma rockspec links lzma.lib, the import library of
+          # XZ Utils 5.6.3 and later; older vcpkg ports name it liblzma.lib
+          lib="$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib"
+          if [ ! -f "$lib/lzma.lib" ] && [ -f "$lib/liblzma.lib" ]; then
+            cp "$lib/liblzma.lib" "$lib/lzma.lib"
+          fi
+
+      - name: install Lua 5.5
+        uses: luarocks/gh-actions-lua@v14
+        with:
+          luaVersion: "5.5"
+
+      - uses: luarocks/gh-actions-luarocks@v7
+
+      - name: install Lua rocks (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -e
+          luarocks install carray
+          if [ -n "$PCRE2_DIR" ]; then
+            luarocks install lpcre PCRE2_DIR="$PCRE2_DIR"
+          else
+            luarocks install lpcre
+          fi
+          if [ -n "$BROTLI_DIR" ]; then
+            luarocks install compress.brotli BROTLIDEC_DIR="$BROTLI_DIR" BROTLIENC_DIR="$BROTLI_DIR"
+          else
+            luarocks install compress.brotli
+          fi
+          luarocks install luafilesystem
+          luarocks install digest
+          luarocks install cipher.aes
+          luarocks install cipher.rc4
+          if [ -n "$ZLIB_DIR" ]; then
+            luarocks install compress.zlib ZLIB_DIR="$ZLIB_DIR"
+          else
+            luarocks install compress.zlib
+          fi
+          if [ -n "$LZMA_DIR" ]; then
+            luarocks install compress.lzma LZMA_DIR="$LZMA_DIR"
+          else
+            luarocks install compress.lzma
+          fi
+          if [ -n "$BZIP2_DIR" ]; then
+            luarocks install compress.bzip2 BZIP2_DIR="$BZIP2_DIR"
+          else
+            luarocks install compress.bzip2
+          fi
+
+      - name: install Lua rocks (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -e
+          luarocks install carray
+          luarocks install lpcre PCRE2_DIR="$PCRE2_DIR"
+          luarocks install compress.brotli BROTLIDEC_DIR="$BROTLI_DIR" BROTLIENC_DIR="$BROTLI_DIR"
+          luarocks install luafilesystem
+          luarocks install digest
+          luarocks install cipher.aes
+          luarocks install cipher.rc4
+          luarocks install compress.zlib ZLIB_DIR="$ZLIB_DIR"
+          luarocks install compress.lzma LZMA_DIR="$LZMA_DIR"
+          luarocks install compress.bzip2 BZIP2_DIR="$BZIP2_DIR"
+
+      - name: build the port (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          make sys5.5 LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+          make bytecode5.5 LUAC5_5="$(command -v luac5.5 || command -v luac)"
+
+      - name: build the port (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: luarocks make rockspecs/lexiftool-scm-0.rockspec
+
+      - name: build the Perl reference tree
+        shell: bash
+        run: |
+          set -e
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            LUA_BIN=$(cygpath -m "$LUA_BIN")   # Windows path with forward slashes: survives the Makefile's shell
+          fi
+          make test-cli-gen \
+            TEST_CLI_LUA="$LUA_BIN" \
+            TEST_CLI_ROCKS_VER=5.5 \
+            TEST_CLI_JOBS=auto \
+            TEST_CLI_LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)" \
+            TEST_CLI_LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)" \
+            LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+
+      - name: Perl against its own reference (must be 100%)
+        shell: bash
+        run: |
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            LUA_BIN=$(cygpath -m "$LUA_BIN")   # Windows path with forward slashes: survives the Makefile's shell
+          fi
+          make test-cli-perl \
+            TEST_CLI_LUA="$LUA_BIN" \
+            TEST_CLI_ROCKS_VER=5.5 \
+            TEST_CLI_JOBS=auto \
+            TEST_CLI_LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)" \
+            TEST_CLI_LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)" \
+            LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+
+      - name: lexiftool against the reference (must be 100%)
+        # Any difference between lexiftool and exiftool fails this step
+        # (TEST_CLI_EXPECT_IDENTICAL): a regression of the port must not hide
+        # behind a green job. The report in the artifact names the cases.
+        shell: bash
+        run: |
+          LUA_BIN=$(command -v lua5.5 || command -v lua)
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            LUA_BIN=$(cygpath -m "$LUA_BIN")   # Windows path with forward slashes: survives the Makefile's shell
+          fi
+          make test-cli-lua \
+            TEST_CLI_EXPECT_IDENTICAL=1 \
+            TEST_CLI_LUA="$LUA_BIN" \
+            LUAC5_5="$(command -v luac5.5 || command -v luac)" \
+            TEST_CLI_ROCKS_VER=5.5 \
+            TEST_CLI_JOBS=auto \
+            TEST_CLI_LUA_PATH="./src/?.lua;./src/?/init.lua;$(luarocks path --lr-path)" \
+            TEST_CLI_LUA_CPATH="./build/5.5/?.so;./?.so;$(luarocks path --lr-cpath)" \
+            LUA_INCDIR_5.5="$(luarocks config variables.LUA_INCDIR)"
+
+      - name: collect the differences
+        # The report names the differing cases; the first lines of each
+        # case's diff are what a reader needs to see without downloading the
+        # trees, which are generated per OS and too large to keep.
+        if: always()
+        shell: bash
+        run: |
+          if [ -f test-cli-out/failures.txt ]; then
+            cut -f5 test-cli-out/failures.txt | sort -u | while read -r c; do
+              echo "=== $c"
+              # diff exits 1 for "differs", the expected case here; 2 (a
+              # missing tree) is a real error and fails the step. The output
+              # goes to a file first: cutting a pipe with head would kill diff
+              # with SIGPIPE and fail the step under pipefail.
+              rc=0
+              diff -r "test-cli-ref/$c" "test-cli-out/$c" > test-cli-out/.diff || rc=$?
+              [ "$rc" -le 1 ] || exit "$rc"
+              head -40 test-cli-out/.diff
+            done > test-cli-out/diffs.txt
+            rm -f test-cli-out/.diff
+          fi
+
+      - name: upload the comparison report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cli-golden-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            test-cli-out/summary.txt
+            test-cli-out/failures.txt
+            test-cli-out/results.json
+            test-cli-out/diffs.txt
+            build/test-cli/worker-*.err
+          if-no-files-found: warn
+
+  # Standalone executables (see standalone/README.md): built with podman on
+  # an ubuntu runner, rebuilt in a fresh container to prove the build is
+  # reproducible, smoke-tested, uploaded as a run artifact, and attached to
+  # the GitHub release for v* tags. One matrix job, one entry per platform
+  # in the UI; the platform-specific steps are selected with `if`.
+  #
+  # Not run for pull requests: the builds take up to an hour each and are
+  # not a PR gate.
+  standalone:
+    name: standalone (${{ matrix.platform }})
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: write   # release assets on v* tags
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            exe: lexiftool
+          - platform: macos
+            exe: lexiftool
+          - platform: windows
+            exe: lexiftool.exe
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true    # vendor/exiftool: test images for the smoke test
+          fetch-depth: 0      # full history + tags: the Makefile's SA_IDENTITY (git describe) needs both
+
+      - name: Build
+        run: make ${{ matrix.platform }}
+
+      - name: Verify the build is reproducible
+        run: |
+          # rebuild in a fresh container; executable and zip must not change
+          dist=dist-${{ matrix.platform }}
+          h1=$(sha256sum "$dist/${{ matrix.exe }}" "$dist"/*.zip)
+          rm -rf build/standalone "$dist"
+          make ${{ matrix.platform }} >/dev/null
+          h2=$(sha256sum "$dist/${{ matrix.exe }}" "$dist"/*.zip)
+          echo "run1: $h1"
+          echo "run2: $h2"
+          test "$h1" = "$h2"
+
+      - name: Check the universal binary (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          file dist-macos/lexiftool
+          file dist-macos/lexiftool | grep -q "Mach-O universal binary with 2 architectures"
+
+      - name: Smoke test (native Linux)
+        if: matrix.platform == 'linux'
+        run: sh standalone/smoke.sh dist-linux/lexiftool
+
+      - name: Smoke test (wine)
+        if: matrix.platform == 'windows'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends wine wine64
+          WINEDEBUG=-all sh standalone/smoke.sh wine dist-windows/lexiftool.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: lexiftool-${{ matrix.platform }}-${{ github.sha }}
+          path: dist-${{ matrix.platform }}/*.zip
+          if-no-files-found: error
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The zip name already carries the build's own identity
+          # (standalone/build.sh derives it from the Makefile's SA_IDENTITY),
+          # so it is uploaded as-is.
+          asset=$(ls dist-${{ matrix.platform }}/*.zip)
+          # The other matrix builds may create the same release
+          # concurrently: never a bare `gh release create`; upload, and
+          # create the release only if it does not exist yet.
+          for i in 1 2 3 4 5; do
+            if gh release upload "$GITHUB_REF_NAME" "$asset" --clobber; then
+              exit 0
+            fi
+            gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+              gh release create "$GITHUB_REF_NAME" \
+                --title "$GITHUB_REF_NAME" --generate-notes >/dev/null 2>&1 || true
+            sleep 20
+          done
+          echo "release upload failed after retries" >&2
+          exit 1
+
+  # The cross build cannot run Mach-O binaries on Linux: the functional test
+  # runs on a macOS runner (arm64 natively, the Intel slice via Rosetta).
+  macos-smoke:
+    name: macOS smoke
+    needs: standalone
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: lexiftool-macos-${{ github.sha }}
+          path: zip
+
+      - name: Smoke test (arm64)
+        run: |
+          unzip -o zip/*.zip -d zip
+          exe=$(ls zip/lexiftool-macos-*/lexiftool)
+          file "$exe"
+          sh standalone/smoke.sh "$exe"
+
+      - name: Smoke test (x86_64 via Rosetta)
+        # The Intel slice of the universal binary must run; a runner without
+        # Rosetta fails here rather than skipping the test.
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license
+          exe=$(ls zip/lexiftool-macos-*/lexiftool)
+          arch -x86_64 /usr/bin/true
+          sh standalone/smoke.sh arch -x86_64 "$exe"
+
+  # The Windows executable runs under wine on the Linux build runner already;
+  # this job additionally runs it natively on a Windows runner.
+  windows-smoke:
+    name: Windows smoke
+    needs: standalone
+    if: github.event_name != 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: lexiftool-windows-${{ github.sha }}
+          path: zip
+
+      - name: Extract the archive
+        shell: pwsh
+        run: |
+          # Git Bash has neither unzip nor a zip-capable tar; PowerShell's
+          # Expand-Archive does the job.
+          Get-ChildItem zip/*.zip | ForEach-Object {
+            Expand-Archive -Path $_.FullName -DestinationPath zip -Force
+          }
+
+      - name: Smoke test (native Windows)
+        shell: bash
+        run: |
+          exe=$(ls zip/lexiftool-windows-*/lexiftool.exe)
+          sh standalone/smoke.sh "$exe"
