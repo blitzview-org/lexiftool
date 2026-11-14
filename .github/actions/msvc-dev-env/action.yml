@@ -1,0 +1,32 @@
+# Puts the MSVC x64 developer environment (cl, link, INCLUDE, LIB, ...) into
+# the environment of all later steps of the job: runs vcvars64.bat of the
+# newest Visual Studio with the C++ tools and exports every variable it adds
+# or changes through GITHUB_ENV. A plain script step, so it depends on no
+# JavaScript action and its Node.js runtime.
+name: MSVC developer environment
+description: Export the MSVC x64 build environment to the following steps (Windows only)
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'no Visual Studio installation with the C++ x64 tools found' }
+        $bat = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+        # environment as vcvars64.bat leaves it, one NAME=value per line
+        $lines = cmd /c "`"$bat`" >nul && set"
+        if ($LASTEXITCODE -ne 0) { throw "$bat failed (exit $LASTEXITCODE)" }
+        $count = 0
+        foreach ($line in $lines) {
+            $i = $line.IndexOf('=')
+            if ($i -le 0) { continue }
+            $name = $line.Substring(0, $i)
+            $value = $line.Substring($i + 1)
+            if ([Environment]::GetEnvironmentVariable($name) -ne $value) {
+                "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+                $count++
+            }
+        }
+        Write-Host "MSVC environment from $bat ($count variables exported)"

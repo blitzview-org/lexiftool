@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx xmlns="http://www.topografix.com/GPX/1/1" version="1.1" creator="lexiftool test">
+<trk><name>DOP</name>
+<trkseg>
+<trkpt lat="43.641000" lon="-116.062231"><ele>1472.4</ele><time>2003-05-24T17:09:00Z</time><pdop>2.40</pdop></trkpt>
+<trkpt lat="43.641450" lon="-116.061802"><ele>1479.6</ele><time>2003-05-24T17:09:20Z</time><hdop>1.20</hdop><vdop>1.60</vdop></trkpt>
+<trkpt lat="43.641922" lon="-116.062338"><ele>1488.7</ele><time>2003-05-24T17:09:40Z</time><hdop>0.90</hdop></trkpt>
+</trkseg>
+</trk>
+</gpx>

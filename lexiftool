@@ -1,0 +1,117 @@
+#!/usr/bin/env lua
+--------------------------------------------------------------------------------
+-- File:         lexiftool
+--
+-- Description:  Command-line entry point. Mirrors upstream's own BEGIN block
+--               (vendor/exiftool/exiftool) that adds its `lib` directory to
+--               Perl's include path before `use Image::ExifTool` -- this is
+--               the one place in the project allowed to touch package.path
+--               (the "no package.path in code" rule, CONTRIBUTING.md, is about the
+--               library modules; every other script here is invoked via the
+--               Makefile, which supplies LUA_PATH itself instead).
+--               The port's own C module (lexiftool.sys) is looked up where
+--               `make sys` builds it, build/<Lua version>/, with the
+--               platform's library suffix.
+--
+--               Bytecode: a searcher placed before
+--               Lua's own ones loads lexiftool modules from the bytecode
+--               `make bytecode` builds, build/<Lua version>/bc/<module
+--               path>.luac next to the source tree the module's source was
+--               found in (<root>/src/... -> <root>/build/5.5/bc/...). It does
+--               so only when that .luac is strictly newer than the source
+--               (mtime via lfs, whole seconds; the build waits out the
+--               source's second so a fresh build is never "equal"); missing,
+--               stale or unloadable bytecode, or no lfs, means the source --
+--               stale bytecode is never used. LEXIFTOOL_BYTECODE=0 in the
+--               environment forces the sources; it is a switch of this
+--               launcher only, the library never reads it.
+--------------------------------------------------------------------------------
+
+local luaVer = _VERSION:match('%d+%.%d+')
+
+-- Module paths for this Lua version.  Lua takes package.path/cpath from
+-- LUA_PATH_5_5 (for 5.5), else from the unversioned LUA_PATH -- which in a
+-- shell set up for another Lua (typically 5.1, `luarocks path`) points at
+-- that version's rock tree, where a C module such as lpcre.so is built
+-- against another Lua ABI and fails to load ("undefined symbol:
+-- lua_equal").  So the launcher drops every entry of another version's tree
+-- (`.../lua/5.1/...`) and appends this version's: the per-user rock tree
+-- the Makefile installs into ($HOME/.luarocks, its LUA_ROCKS default) and
+-- the system trees Lua's own default path names (/usr/local, /usr).
+-- Entries already present keep their place, so a LUA_PATH_5_5 the user set
+-- still wins; only the launcher does this, the library never touches
+-- package.path (CONTRIBUTING.md "Configuration").
+do
+    local dirSep = package.config:sub(1, 1)
+    local libExt = dirSep == '\\' and 'dll' or 'so'
+    local home = os.getenv('HOME')
+    local function fixPath(path, extra)
+        local list, seen = {}, {}
+        for entry in path:gmatch('[^;]+') do
+            local ver = entry:match('[/\\]lua[/\\](%d+%.%d+)[/\\]')
+            if (ver == nil or ver == luaVer) and not seen[entry] then
+                list[#list + 1] = entry
+                seen[entry] = true
+            end
+        end
+        for _, entry in ipairs(extra) do
+            if not seen[entry] then
+                list[#list + 1] = entry
+                seen[entry] = true
+            end
+        end
+        return table.concat(list, ';')
+    end
+    local trees = { '/usr/local', '/usr' }
+    if home and home ~= '' then table.insert(trees, 1, home .. '/.luarocks') end
+    local lpath, cpath = {}, {}
+    for _, tree in ipairs(trees) do
+        lpath[#lpath + 1] = tree .. '/share/lua/' .. luaVer .. '/?.lua'
+        lpath[#lpath + 1] = tree .. '/share/lua/' .. luaVer .. '/?/init.lua'
+        cpath[#cpath + 1] = tree .. '/lib/lua/' .. luaVer .. '/?.' .. libExt
+    end
+    package.path = fixPath(package.path, lpath)
+    package.cpath = fixPath(package.cpath, cpath)
+end
+
+-- Use the source tree next to this script when there is one (a checkout run
+-- as ./lexiftool), even if a lexiftool is installed in a system or rock tree:
+-- package.searchpath('lexiftool.main', package.path) would otherwise find the
+-- installed copy and silently run that instead of the working tree.
+local scriptDir = arg[0]:match('^(.*)[/\\][^/\\]+$') or '.'
+if package.searchpath('lexiftool.main', scriptDir .. '/src/?.lua') then
+    local libExt = package.config:sub(1, 1) == '\\' and 'dll' or 'so'
+    package.path = scriptDir .. '/src/?.lua;' .. scriptDir .. '/src/?/init.lua;' .. package.path
+    package.cpath = scriptDir .. '/build/' .. luaVer .. '/?.' .. libExt .. ';' .. package.cpath
+end
+
+local okLfs, lfs = pcall(require, 'lfs')
+if okLfs and os.getenv('LEXIFTOOL_BYTECODE') ~= '0' then
+    local attributes = lfs.attributes
+    local function bytecodeSearcher(name)
+        if name ~= 'lexiftool' and name:sub(1, 10) ~= 'lexiftool.' then return nil end
+        local src = package.searchpath(name, package.path)
+        if not src then return nil end      -- Lua's own searchers report it
+        local rel = name:gsub('%.', '/')
+        local tail = 'src/' .. rel .. '.lua'
+        if src:sub(-#tail) ~= tail then return nil end
+        local bc = src:sub(1, -#tail - 1) .. 'build/' .. luaVer .. '/bc/' .. rel .. '.luac'
+        local bcTime = attributes(bc, 'modification')
+        if not bcTime then return nil end
+        local srcTime = attributes(src, 'modification')
+        if not srcTime or bcTime <= srcTime then
+            return '\n\tstale bytecode \'' .. bc .. '\' (older than its source)'
+        end
+        local chunk, err = loadfile(bc, 'b')
+        if not chunk then return '\n\t' .. err end
+        return chunk, bc
+    end
+    table.insert(package.searchers, 2, bytecodeSearcher)
+end
+
+-- (require's second result is the searcher's loader data: the .luac path
+--  when the bytecode searcher above found the module)
+local mainFn, mainFrom = require('lexiftool.main')
+local bytecode = type(mainFrom) == 'string' and mainFrom:sub(-5) == '.luac'
+
+os.exit(mainFn(arg, { bytecode = bytecode }))

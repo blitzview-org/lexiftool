@@ -1,0 +1,129 @@
+<?xpacket begin='﻿' id='W5M0MpCehiHzreSzNTczkc9d'?>
+<x:xmpmeta xmlns:x='adobe:ns:meta/' x:xmptk='Image::ExifTool 13.59'>
+<rdf:RDF xmlns:rdf='http://www.w3.org/1999/02/22-rdf-syntax-ns#'>
+
+ <rdf:Description rdf:about=''
+  xmlns:Iptc4xmpExt='http://iptc.org/std/Iptc4xmpExt/2008-02-29/'>
+  <Iptc4xmpExt:ImageRegion>
+   <rdf:Bag>
+    <rdf:li rdf:parseType='Resource'>
+     <Iptc4xmpExt:Name>
+      <rdf:Alt>
+       <rdf:li xml:lang='x-default'>Anna</rdf:li>
+      </rdf:Alt>
+     </Iptc4xmpExt:Name>
+     <Iptc4xmpExt:RegionBoundary rdf:parseType='Resource'>
+      <Iptc4xmpExt:rbH>400</Iptc4xmpExt:rbH>
+      <Iptc4xmpExt:rbShape>rectangle</Iptc4xmpExt:rbShape>
+      <Iptc4xmpExt:rbUnit>pixel</Iptc4xmpExt:rbUnit>
+      <Iptc4xmpExt:rbW>300</Iptc4xmpExt:rbW>
+      <Iptc4xmpExt:rbX>100</Iptc4xmpExt:rbX>
+      <Iptc4xmpExt:rbY>200</Iptc4xmpExt:rbY>
+     </Iptc4xmpExt:RegionBoundary>
+    </rdf:li>
+    <rdf:li rdf:parseType='Resource'>
+     <Iptc4xmpExt:Name>
+      <rdf:Alt>
+       <rdf:li xml:lang='x-default'>Ben</rdf:li>
+      </rdf:Alt>
+     </Iptc4xmpExt:Name>
+     <Iptc4xmpExt:RegionBoundary rdf:parseType='Resource'>
+      <Iptc4xmpExt:rbH>0.1</Iptc4xmpExt:rbH>
+      <Iptc4xmpExt:rbShape>rectangle</Iptc4xmpExt:rbShape>
+      <Iptc4xmpExt:rbUnit>relative</Iptc4xmpExt:rbUnit>
+      <Iptc4xmpExt:rbW>0.1</Iptc4xmpExt:rbW>
+      <Iptc4xmpExt:rbX>0.5</Iptc4xmpExt:rbX>
+      <Iptc4xmpExt:rbY>0.5</Iptc4xmpExt:rbY>
+     </Iptc4xmpExt:RegionBoundary>
+    </rdf:li>
+    <rdf:li rdf:parseType='Resource'>
+     <Iptc4xmpExt:RegionBoundary rdf:parseType='Resource'>
+      <Iptc4xmpExt:rbRx>0.05</Iptc4xmpExt:rbRx>
+      <Iptc4xmpExt:rbShape>circle</Iptc4xmpExt:rbShape>
+      <Iptc4xmpExt:rbUnit>relative</Iptc4xmpExt:rbUnit>
+      <Iptc4xmpExt:rbX>0.2</Iptc4xmpExt:rbX>
+      <Iptc4xmpExt:rbY>0.2</Iptc4xmpExt:rbY>
+     </Iptc4xmpExt:RegionBoundary>
+    </rdf:li>
+    <rdf:li rdf:parseType='Resource'>
+     <Iptc4xmpExt:Name>
+      <rdf:Alt>
+       <rdf:li xml:lang='x-default'>Dora</rdf:li>
+      </rdf:Alt>
+     </Iptc4xmpExt:Name>
+    </rdf:li>
+   </rdf:Bag>
+  </Iptc4xmpExt:ImageRegion>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:MP='http://ns.microsoft.com/photo/1.2/'
+  xmlns:MPRI='http://ns.microsoft.com/photo/1.2/t/RegionInfo#'
+  xmlns:MPReg='http://ns.microsoft.com/photo/1.2/t/Region#'>
+  <MP:RegionInfo rdf:parseType='Resource'>
+   <MPRI:Regions>
+    <rdf:Bag>
+     <rdf:li rdf:parseType='Resource'>
+      <MPReg:PersonDisplayName>Anna</MPReg:PersonDisplayName>
+      <MPReg:Rectangle>0.1, 0.2, 0.3, 0.4</MPReg:Rectangle>
+     </rdf:li>
+     <rdf:li rdf:parseType='Resource'>
+      <MPReg:PersonDisplayName>Ben</MPReg:PersonDisplayName>
+      <MPReg:Rectangle>0.5, 0.5, 0.2, 0.25</MPReg:Rectangle>
+     </rdf:li>
+     <rdf:li rdf:parseType='Resource'>
+      <MPReg:PersonDisplayName>ffffffffffffffff</MPReg:PersonDisplayName>
+      <MPReg:Rectangle>0.6, 0.1, 0.1, 0.1</MPReg:Rectangle>
+     </rdf:li>
+    </rdf:Bag>
+   </MPRI:Regions>
+  </MP:RegionInfo>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:mwg-rs='http://www.metadataworkinggroup.com/schemas/regions/'
+  xmlns:stArea='http://ns.adobe.com/xmp/sType/Area#'
+  xmlns:stDim='http://ns.adobe.com/xap/1.0/sType/Dimensions#'>
+  <mwg-rs:Regions rdf:parseType='Resource'>
+   <mwg-rs:AppliedToDimensions rdf:parseType='Resource'>
+    <stDim:h>3000</stDim:h>
+    <stDim:unit>pixel</stDim:unit>
+    <stDim:w>4000</stDim:w>
+   </mwg-rs:AppliedToDimensions>
+   <mwg-rs:RegionList>
+    <rdf:Bag>
+     <rdf:li rdf:parseType='Resource'>
+      <mwg-rs:Area rdf:parseType='Resource'>
+       <stArea:h>0.2</stArea:h>
+       <stArea:unit>normalized</stArea:unit>
+       <stArea:w>0.1</stArea:w>
+       <stArea:x>0.5</stArea:x>
+       <stArea:y>0.4</stArea:y>
+      </mwg-rs:Area>
+      <mwg-rs:Name>Anna</mwg-rs:Name>
+      <mwg-rs:Type>Face</mwg-rs:Type>
+     </rdf:li>
+     <rdf:li rdf:parseType='Resource'>
+      <mwg-rs:Area rdf:parseType='Resource'>
+       <stArea:h>0.3</stArea:h>
+       <stArea:unit>normalized</stArea:unit>
+       <stArea:w>0.2</stArea:w>
+       <stArea:x>0.25</stArea:x>
+       <stArea:y>0.75</stArea:y>
+      </mwg-rs:Area>
+      <mwg-rs:Name>Ben</mwg-rs:Name>
+      <mwg-rs:Type>Face</mwg-rs:Type>
+     </rdf:li>
+    </rdf:Bag>
+   </mwg-rs:RegionList>
+  </mwg-rs:Regions>
+ </rdf:Description>
+
+ <rdf:Description rdf:about=''
+  xmlns:tiff='http://ns.adobe.com/tiff/1.0/'>
+  <tiff:ImageLength>3000</tiff:ImageLength>
+  <tiff:ImageWidth>4000</tiff:ImageWidth>
+ </rdf:Description>
+</rdf:RDF>
+</x:xmpmeta>
+<?xpacket end='w'?>

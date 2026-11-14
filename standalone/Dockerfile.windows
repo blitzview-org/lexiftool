@@ -1,0 +1,27 @@
+# Builder image for the Windows x86-64 executable (make windows):
+# mingw-w64 cross compiler; native gcc + libc6-dev build the host lua55
+# that the embed generator runs under; zip packs the release archive.
+# Build context: the standalone/ directory.
+FROM docker.io/library/debian:bookworm-slim@sha256:362e64223cc0da95422b3b13c045186fc0a81250e765d31c025fbddf257f6143
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        bzip2 \
+        make \
+        libc6-dev \
+        gcc \
+        gcc-mingw-w64-x86-64 \
+        zip && \
+    rm -rf /var/lib/apt/lists/*
+
+# Third-party sources, pinned by URL + SHA256 (one list for all images)
+WORKDIR /usr/src
+COPY fetch.sh /usr/src/fetch.sh
+RUN sh /usr/src/fetch.sh
+
+# Build all dependencies statically into /opt/lx
+COPY deps.sh /usr/src/deps.sh
+RUN sh /usr/src/deps.sh windows && rm -rf /usr/src/*
