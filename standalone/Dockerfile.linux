@@ -1,0 +1,37 @@
+# Builder image for the Linux x86-64 executable (make linux):
+#   - zig cc 0.14.1 (pinned): cross-compiles the binary, dynamic against
+#     glibc >= 2.17 (libc, libm, libpthread) and static otherwise
+#   - native gcc + libc6-dev: build the host lua55 that the embed
+#     generator runs under; file, readelf and objdump (binutils, with gcc)
+#     check the result; zip packs the release
+# Build context: the standalone/ directory.
+FROM docker.io/library/debian:bookworm-slim@sha256:362e64223cc0da95422b3b13c045186fc0a81250e765d31c025fbddf257f6143
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        xz-utils \
+        bzip2 \
+        make \
+        libc6-dev \
+        gcc \
+        file \
+        zip && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz && \
+    echo "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c  /tmp/zig.tar.xz" | sha256sum -c - && \
+    mkdir -p /opt/zig && tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig && \
+    rm /tmp/zig.tar.xz
+ENV PATH="/opt/zig:${PATH}"
+
+# Third-party sources, pinned by URL + SHA256 (one list for all images)
+WORKDIR /usr/src
+COPY fetch.sh /usr/src/fetch.sh
+RUN sh /usr/src/fetch.sh
+
+# Build all dependencies statically into /opt/lx
+COPY deps.sh /usr/src/deps.sh
+RUN sh /usr/src/deps.sh linux && rm -rf /usr/src/*
