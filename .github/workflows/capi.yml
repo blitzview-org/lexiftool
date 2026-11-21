@@ -1,0 +1,309 @@
+name: capi
+
+# The C API's embedded libraries (doc/capi.md, "Building") and its
+# ThreadSanitizer runs, as a workflow of its own: started from the Actions
+# tab ("Run workflow"), before a release or after a change to the build
+# scripts; the CI workflow's capi job covers the "rock" variant on every
+# push. Optionally for one platform.
+#
+#   build     on Linux, in the standalone builder containers (podman):
+#             make capi-linux / capi-macos / capi-windows; the outputs
+#             go to the test jobs as artifacts (tar: the programs keep
+#             their modes; unpacked with the time of unpacking, newer than
+#             the checkout, which build-linux.sh test checks)
+#   linux     the embedded Linux libraries' tests (static and shared,
+#             test_hostlibs, side effects, Perl comparison) and
+#             ThreadSanitizer over the embedded build and the rock build
+#   macos     the universal libraries' tests on a macOS runner: arm64
+#             natively (plus test_hostlibs against Homebrew's Lua and zlib,
+#             and the Perl comparison), test_capi of the x86_64 slice
+#             under Rosetta
+#   windows   the MSVC link test (cl against lexiftool.lib, test_hostlibs
+#             with the Lua of luarocks and vcpkg's zlib) and the tests of
+#             every Windows build (MinGW static, DLL, MSVC) with the Perl
+#             comparison
+#
+# The Perl setups are cli-golden's (ci.yml); keep them in step.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "platform (all, linux, macos, windows)"
+        type: choice
+        default: all
+        options: [all, linux, macos, windows]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(inputs.platform == 'all' && '["linux", "macos", "windows"]' || format('["{0}"]', inputs.platform)) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+          fetch-depth: 0      # git describe: the library's version
+
+      - name: host libraries for test_hostlibs (Linux)
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends liblua5.4-dev zlib1g-dev pkg-config
+
+      - name: build
+        run: make capi-${{ matrix.platform }}
+
+      - name: pack
+        run: tar -C capi/build -cf capi-${{ matrix.platform }}.tar ${{ matrix.platform == 'linux' && 'embedded' || matrix.platform }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: capi-${{ matrix.platform }}-${{ github.sha }}
+          path: capi-${{ matrix.platform }}.tar
+          if-no-files-found: error
+
+  linux:
+    name: linux (embedded, ThreadSanitizer)
+    needs: build
+    if: inputs.platform == 'all' || inputs.platform == 'linux'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: capi-linux-${{ github.sha }}
+
+      - name: unpack
+        run: mkdir -p capi/build && tar -C capi/build -xmf capi-linux.tar
+
+      - name: C libraries and the Perl original with its optional modules
+        # plus the host Lua and pkg-config for test_hostlibs
+        uses: ./.github/actions/perl-exiftool
+        with:
+          extra-apt: liblua5.4-dev pkg-config
+
+      - name: tests of the embedded libraries
+        run: |
+          status=0
+          CAPI_PERL=perl sh capi/build-linux.sh test || status=1
+          sh capi/build-linux.sh sideeffects || status=1
+          exit $status
+
+      - name: ThreadSanitizer, embedded build (builder container)
+        run: make capi-test-tsan-embedded
+
+      - name: install Lua 5.5 (rock build under ThreadSanitizer)
+        uses: luarocks/gh-actions-lua@v14
+        with:
+          luaVersion: "5.5"
+
+      - uses: luarocks/gh-actions-luarocks@v7
+
+      - name: ThreadSanitizer, rock build
+        # Lua, the rocks and lexiftool.sys built with -fsanitize=thread
+        run: CAPI_LUA="$(command -v lua5.5 || command -v lua)" make capi-test-tsan
+
+      - name: upload the test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: capi-linux-test-${{ github.sha }}
+          path: capi/build/test*/
+          if-no-files-found: warn
+
+  macos:
+    name: macos (embedded)
+    needs: build
+    if: inputs.platform == 'all' || inputs.platform == 'macos'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: capi-macos-${{ github.sha }}
+
+      - name: unpack
+        run: |
+          mkdir -p capi/build && tar -C capi/build -xmf capi-macos.tar
+          file capi/build/macos/lib/liblexiftool.a capi/build/macos/lib/liblexiftool.3.dylib
+
+      - name: CMake 3 for Alien::cmake3
+        # IO::Compress::Brotli builds through Alien::cmake3, which takes
+        # only a cmake 3.x; the runners carry 4.x, so it would download one
+        # from cmake.org, which does not always answer the runners. A cmake
+        # 3 from PyPI instead: only its binary goes into PATH, not the
+        # Python of its venv.
+        shell: bash
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" -m venv "$RUNNER_TEMP/cmake3"
+          vpy="$RUNNER_TEMP/cmake3/bin/python"
+          [ -x "$vpy" ] || vpy="$RUNNER_TEMP/cmake3/Scripts/python.exe"
+          "$vpy" -m pip install --quiet --disable-pip-version-check "cmake>=3.16,<4"
+          bin=$("$vpy" -c "import cmake, os; print(os.path.join(os.path.dirname(cmake.__file__), 'data', 'bin'))")
+          "$bin/cmake" --version
+          if command -v cygpath > /dev/null 2>&1; then bin=$(cygpath -w "$bin"); fi
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: Perl and the host libraries for test_hostlibs
+        run: |
+          brew install perl cpanminus brotli xz lua zlib pkg-config
+          echo "CAPI_PERL=$(brew --prefix perl)/bin/perl" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(brew --prefix zlib)/lib/pkgconfig" >> "$GITHUB_ENV"
+          cpanm --notest Archive::Zip IO::String Term::ReadKey Unicode::LineBreak
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)" cpanm --notest Net::SSLeay
+          BROTLI_INCLUDE="$(brew --prefix brotli)/include" BROTLI_LIB="$(brew --prefix brotli)/lib" \
+            cpanm --notest IO::Compress::Brotli
+          LIBLZMA_INCLUDE="$(brew --prefix xz)/include" LIBLZMA_LIB="$(brew --prefix xz)/lib" \
+            cpanm --notest Compress::Raw::Lzma
+
+      - name: tests (arm64)
+        run: sh capi/build-macos.sh test
+
+      - name: test_capi of the x86_64 slice (Rosetta)
+        run: |
+          sudo softwareupdate --install-rosetta --agree-to-license
+          mkdir -p capi/build/rosetta
+          arch -x86_64 capi/build/macos/bin/test_capi vendor/exiftool/t/images capi/build/rosetta 3
+          arch -x86_64 capi/build/macos/bin/test_capi-so vendor/exiftool/t/images capi/build/rosetta 3
+
+      - name: upload the test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: capi-macos-test-${{ github.sha }}
+          path: capi/build/test*/
+          if-no-files-found: warn
+
+  windows:
+    name: windows (embedded, MSVC)
+    needs: build
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: disable autocrlf
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: capi-windows-${{ github.sha }}
+
+      - name: unpack
+        shell: bash
+        run: mkdir -p capi/build && tar -C capi/build -xmf capi-windows.tar
+
+      - name: CMake 3 for Alien::cmake3
+        # IO::Compress::Brotli builds through Alien::cmake3, which takes
+        # only a cmake 3.x; the runners carry 4.x, so it would download one
+        # from cmake.org, which does not always answer the runners. A cmake
+        # 3 from PyPI instead: only its binary goes into PATH, not the
+        # Python of its venv.
+        shell: bash
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" -m venv "$RUNNER_TEMP/cmake3"
+          vpy="$RUNNER_TEMP/cmake3/bin/python"
+          [ -x "$vpy" ] || vpy="$RUNNER_TEMP/cmake3/Scripts/python.exe"
+          "$vpy" -m pip install --quiet --disable-pip-version-check "cmake>=3.16,<4"
+          bin=$("$vpy" -c "import cmake, os; print(os.path.join(os.path.dirname(cmake.__file__), 'data', 'bin'))")
+          "$bin/cmake" --version
+          if command -v cygpath > /dev/null 2>&1; then bin=$(cygpath -w "$bin"); fi
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: install optional Perl modules
+        shell: cmd
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          C:\Strawberry\perl\bin\perl.exe C:\Strawberry\perl\bin\cpanm --notest Win32::API IO::String IO::Compress::Brotli Unicode::LineBreak || (type %USERPROFILE%\.cpanm\build.log & exit /b 1)
+          echo CAPI_PERL=C:/Strawberry/perl/bin/perl.exe>> %GITHUB_ENV%
+
+      - uses: ./.github/actions/msvc-dev-env
+
+      - name: remove conflicting Git link.exe
+        shell: bash
+        run: rm -f "/usr/bin/link.exe"
+
+      - name: zlib for test_hostlibs, liblzma for the reference Perl
+        shell: bash
+        run: |
+          vcpkg install zlib:x64-windows liblzma:x64-windows
+          echo "ZLIB_DIR=$VCPKG_INSTALLATION_ROOT/installed/x64-windows" >> "$GITHUB_ENV"
+          echo "$VCPKG_INSTALLATION_ROOT/installed/x64-windows/bin" >> "$GITHUB_PATH"
+          zlib_lib="$VCPKG_INSTALLATION_ROOT/installed/x64-windows/lib"
+          if [ ! -f "$zlib_lib/zlib.lib" ]; then
+            if [ -f "$zlib_lib/z.lib" ]; then
+              cp "$zlib_lib/z.lib" "$zlib_lib/zlib.lib"
+            elif [ -f "$zlib_lib/libz.lib" ]; then
+              cp "$zlib_lib/libz.lib" "$zlib_lib/zlib.lib"
+            else
+              echo "no zlib import library in $zlib_lib:" >&2; ls "$zlib_lib"/*.lib >&2; exit 1
+            fi
+          fi
+
+      - name: Compress::Raw::Lzma for the reference Perl
+        # As in ci.yml's test job.
+        shell: cmd
+        env:
+          CC: gcc
+          CXX: g++
+        run: |
+          set PATH=C:\Strawberry\c\bin;C:\Strawberry\perl\site\bin;C:\Strawberry\perl\bin;%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin;%PATH%
+          set LIBLZMA_INCLUDE=%VCPKG_INSTALLATION_ROOT%\installed\x64-windows\include
+          mkdir %RUNNER_TEMP%\lzma-gcc
+          cd /d %RUNNER_TEMP%\lzma-gcc
+          gendef %VCPKG_INSTALLATION_ROOT%\installed\x64-windows\bin\liblzma.dll || exit /b 1
+          dlltool -d liblzma.def -D liblzma.dll -l liblzma.dll.a || exit /b 1
+          copy liblzma.dll.a liblzma.a
+          set LIBLZMA_LIB=%RUNNER_TEMP%\lzma-gcc
+          C:\Strawberry\perl\bin\perl.exe C:\Strawberry\perl\bin\cpanm --notest Compress::Raw::Lzma || (type %USERPROFILE%\.cpanm\build.log & exit /b 1)
+
+      - name: install Lua 5.5 (the host Lua of test_hostlibs)
+        uses: luarocks/gh-actions-lua@v14
+        with:
+          luaVersion: "5.5"
+
+      - uses: luarocks/gh-actions-luarocks@v7
+
+      - name: MSVC link test
+        shell: bash
+        run: sh capi/build-windows.sh msvc
+
+      - name: tests (MinGW static, DLL, MSVC)
+        shell: bash
+        run: sh capi/build-windows.sh test
+
+      - name: upload the test output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: capi-windows-test-${{ github.sha }}
+          path: capi/build/test*/
+          if-no-files-found: warn
