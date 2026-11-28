@@ -1,0 +1,79 @@
+# Makefile.standalone - standalone executables of lexiftool, included at the
+# end of the Makefile (`-include Makefile.standalone`). Everything is built
+# inside podman containers on Linux; see standalone/README.md.
+#
+#   make windows     -> dist-windows/lexiftool.exe  (+ lexiftool-windows-<version>.zip)
+#                       x86-64, mingw-w64, static: imports KERNEL32 + msvcrt only
+#   make macos       -> dist-macos/lexiftool        (+ lexiftool-macos-<version>.zip)
+#                       universal x86_64 + arm64, zig cc, libSystem only
+#   make linux       -> dist-linux/lexiftool        (+ lexiftool-linux-<version>.zip)
+#                       x86-64, zig cc, dynamic against glibc >= 2.17 only
+#                       (libc, libm, libpthread), the rest static
+#   make smoke-linux / smoke-windows (wine) - smoke test of a built executable
+#   make standalone-clean       remove build/standalone and dist-*/
+#   make standalone-clean-all   ... and the builder images
+#
+# Each executable is a Lua 5.5 interpreter with the lexiftool modules
+# (bytecode, including the bundled Geolocation database) and the C modules
+# lexiftool.sys, lexiftool.util, lpcre, carray, lfs, digest, compress.brotli, compress.zlib,
+# compress.lzma, compress.bzip2, cipher.aes, cipher.rc4 (+ PCRE2, zlib, brotli, liblzma, libbz2) inside; the embedded entries are stored as is
+# (SA_COMPRESS=0, the default) or zstd-compressed, each decoded when first used.
+# Reproducible: the same commit (same worktree state, SA_IDENTITY included)
+# yields byte-identical executables and zips (SOURCE_DATE_EPOCH = last
+# commit time). Each executable carries its own version/identity
+# (SA_IDENTITY, a `git describe`; see dist-*/identity.txt and
+# `lexiftool -ver -v`).
+
+SA_PODMAN ?= podman
+SA_IMAGE  ?= lexiftool-builder
+SA_SOURCE_DATE_EPOCH ?= $(shell git -C $(CURDIR) log -1 --pretty=%ct 2>/dev/null || echo 0)
+# the build's own version/identity (CONTRIBUTING.md "Configuration",
+# _G.LEXIFTOOL_PORT_VERSION): computed here on the host, since the builder
+# image has no git; --match 'v*' keeps it off any non-version tag, and the
+# repo's genesis tag (the first two components always the vendored
+# ExifTool version, e.g. vX.Y.0) means this is never just a bare commit
+# hash once that tag exists
+SA_IDENTITY ?= $(shell git -C $(CURDIR) describe --tags --always --long --dirty --match 'v*' 2>/dev/null || echo Unknown)
+# 1 = bytecode without debug information (luac -s); see standalone/README.md
+SA_STRIP_BYTECODE ?= 0
+# codec of the embedded entries: 0 (uncompressed, the default) | zstd (each
+# entry decoded into a buffer on use). Uncompressed, a module is loaded
+# straight from the mapped executable: no decoding (about 2.5 ms per MB of
+# bytecode, 1-3 ms per run) and no decode buffers -- which, freed after
+# each module, still raised the peak RSS of a run over many file types to
+# twice that of a file-based install, as glibc keeps them. The executable
+# grows from 7 to 17 MB, the zip stays within a few hundred KB (the zip
+# compresses either way); see "Build options" in standalone/README.md
+SA_COMPRESS ?= 0
+
+.PHONY: windows macos linux standalone-images \
+        image-windows image-macos image-linux \
+        smoke-linux smoke-windows standalone-clean standalone-clean-all
+
+standalone-images: image-windows image-macos image-linux
+
+# Builder image per platform: toolchain + all third-party dependencies
+# (build context: standalone/ only)
+image-windows image-macos image-linux: image-%:
+	$(SA_PODMAN) build -f standalone/Dockerfile.$* -t $(SA_IMAGE)-$* standalone
+
+windows macos linux: %: image-%
+	$(SA_PODMAN) run --rm \
+		-e SOURCE_DATE_EPOCH=$(SA_SOURCE_DATE_EPOCH) \
+		-e STRIP_BYTECODE=$(SA_STRIP_BYTECODE) \
+		-e COMPRESS=$(SA_COMPRESS) \
+		-e LEXIFTOOL_IDENTITY=$(SA_IDENTITY) \
+		-v "$(CURDIR):/project" \
+		$(SA_IMAGE)-$* sh /project/standalone/build.sh $*
+
+smoke-linux:
+	sh standalone/smoke.sh dist-linux/lexiftool
+
+smoke-windows:
+	WINEDEBUG=-all sh standalone/smoke.sh wine dist-windows/lexiftool.exe
+
+standalone-clean:
+	rm -rf build/standalone dist-windows dist-macos dist-linux
+
+standalone-clean-all: standalone-clean
+	-$(SA_PODMAN) rmi $(SA_IMAGE)-windows $(SA_IMAGE)-macos $(SA_IMAGE)-linux

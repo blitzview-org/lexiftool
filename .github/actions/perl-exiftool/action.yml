@@ -1,0 +1,81 @@
+name: Perl ExifTool (Linux)
+description: >
+  The Perl original with the feature set of a full install, on an Ubuntu
+  runner: the C libraries the lexiftool rocks need, the distribution's Perl
+  with the optional modules it packages, and the three from CPAN
+  (File::StatX, IO::Compress::Brotli, Unicode::LineBreak) in a local::lib
+  tree under ~/perl5 that is cached between runs. Used by the CLI reference
+  runs (ci.yml, corpus.yml), the C API tests (ci.yml, capi.yml) and the
+  performance comparison (benchmark.yml).
+
+# The reference must have the feature set of a full exiftool install:
+# lexiftool has native counterparts for these optional modules, so without
+# them every ZIP (IO::String: a ZIP on stdin), Brotli (JXL), encoded 7z
+# header (LZMA) and -k case differs, and ExifTool only reports
+# FileCreateDate on Linux with File::StatX. Unicode::LineBreak (from CPAN,
+# with its bundled character data) aligns the -lang output by display width,
+# as lexiftool always does.
+#
+# The CPAN modules go into ~/perl5 (cpanm --local-lib) instead of the system
+# tree, so that the directory can be cached: IO::Compress::Brotli alone
+# builds a brotli through Alien::cmake3, several minutes per run. The cache
+# key names this file (its module list), the runner image and the Perl, so a
+# change of any of them rebuilds. PERL5LIB and PATH are exported for all
+# later steps; perl finds the architecture subdirectory of a PERL5LIB entry
+# by itself.
+
+inputs:
+  extra-apt:
+    description: additional apt packages (e.g. liblua5.4-dev pkg-config for the C API tests)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: install C libraries and the distribution's Perl modules
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        # shellcheck disable=SC2086
+        sudo apt-get install -y --no-install-recommends \
+          build-essential libpcre2-dev libbrotli-dev zlib1g-dev liblzma-dev libbz2-dev perl cpanminus \
+          libarchive-zip-perl libio-string-perl libterm-readkey-perl libcompress-raw-lzma-perl \
+          ${{ inputs.extra-apt }}
+        echo "perl=$(perl -e 'print $]')" >> "$GITHUB_OUTPUT"
+        echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+      id: sys
+
+    - name: cache the CPAN modules
+      id: cache
+      uses: actions/cache@v6
+      with:
+        path: ~/perl5
+        key: perl-exiftool-${{ runner.os }}-${{ steps.sys.outputs.image }}-perl${{ steps.sys.outputs.perl }}-${{ hashFiles('.github/actions/perl-exiftool/action.yml') }}
+
+    - name: CMake 3 for Alien::cmake3
+      # IO::Compress::Brotli builds through Alien::cmake3, which takes only a
+      # cmake 3.x; the runners carry 4.x, so it would download one from
+      # cmake.org, which does not always answer the runners. A cmake 3 from
+      # PyPI instead: only its binary goes into PATH, not the Python of its
+      # venv. Needed only when the modules are actually built.
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        python3 -m venv "$RUNNER_TEMP/cmake3"
+        "$RUNNER_TEMP/cmake3/bin/python" -m pip install --quiet --disable-pip-version-check "cmake>=3.16,<4"
+        bin=$("$RUNNER_TEMP/cmake3/bin/python" -c "import cmake, os; print(os.path.join(os.path.dirname(cmake.__file__), 'data', 'bin'))")
+        "$bin/cmake" --version
+        echo "$bin" >> "$GITHUB_PATH"
+
+    - name: install the CPAN modules
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: cpanm --notest --local-lib ~/perl5 File::StatX IO::Compress::Brotli Unicode::LineBreak
+
+    - name: export the local::lib tree
+      shell: bash
+      run: |
+        echo "PERL5LIB=$HOME/perl5/lib/perl5${PERL5LIB:+:$PERL5LIB}" >> "$GITHUB_ENV"
+        echo "$HOME/perl5/bin" >> "$GITHUB_PATH"
+        PERL5LIB="$HOME/perl5/lib/perl5" perl -MFile::StatX -MIO::Compress::Brotli -MUnicode::LineBreak -e 'print "optional Perl modules: ok\n"'

@@ -1,0 +1,115 @@
+name: Benchmark
+
+# Performance comparison of lexiftool with the Perl original on one Ubuntu
+# runner (tools/bench_cli.sh, doc/benchmark.md): both tools are timed in the
+# same run, case by case, so the ratio between them holds although the
+# absolute times of a shared runner vary. The result -- a Markdown table,
+# the bar charts benchmark.svg / benchmark-dark.svg and results.json -- goes
+# into the job summary and a run artifact; the caller publishes it.
+#
+# Two ways in:
+#   workflow_call      from ci.yml, after the standalone job: the Linux
+#                      executable comes from that run's artifact, so the
+#                      numbers belong to exactly the binaries the run then
+#                      publishes (the latest-dev pre-release on master, the
+#                      release on a version tag)
+#   workflow_dispatch  by hand: builds the Linux executable itself (make
+#                      linux, podman -- reproducible, so the same commit
+#                      gives the same bytes as the published one) and shows
+#                      the numbers in the job summary; with `publish` it
+#                      also refreshes the Pages site, i.e. the chart the
+#                      README shows, without touching any release
+#                      (pages.yml; its download pages are rebuilt from the
+#                      latest-dev pre-release as it stands)
+#
+# The Pages site (benchmark.svg, benchmark-dark.svg, results.json,
+# index.html) is where README and release notes take the chart from: a
+# release asset comes with Content-Disposition: attachment and
+# application/octet-stream, which GitHub's image proxy will not render.
+# On master, ci.yml deploys the site (pages.yml) once publish-latest-dev
+# has attached the executables, with this workflow's report artifact.
+# Needs, once, in the repository settings: Pages -> Build and deployment ->
+# Source: GitHub Actions.
+
+on:
+  workflow_call:
+    inputs:
+      artifact:
+        description: name of the run artifact holding the Linux standalone zip
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: deploy chart and tables to the repository's Pages site (what the README shows)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: benchmark (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true    # vendor/exiftool: the Perl original and the test images
+          fetch-depth: 0      # git describe: the build's identity in the report
+
+      - uses: ./.github/actions/perl-exiftool
+
+      - name: install hyperfine, GNU time and Lua
+        run: |
+          sudo apt-get install -y --no-install-recommends hyperfine time lua5.4 jq
+          hyperfine --version
+
+      - name: Linux standalone executable from the calling run
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.artifact }}
+          path: dist-linux
+
+      - name: unpack it
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          cd dist-linux
+          unzip -q lexiftool-linux-*.zip
+          cp lexiftool-linux-*/lexiftool lexiftool
+          ./lexiftool -ver -v | head -3
+
+      - name: build the Linux standalone executable (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        run: make linux
+
+      - name: performance comparison
+        run: |
+          tools/bench_cli.sh build/bench \
+            'perl -Ivendor/exiftool/lib vendor/exiftool/exiftool' dist-linux/lexiftool 20
+          cat build/bench/README.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload the report
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-${{ github.sha }}
+          path: build/bench
+          if-no-files-found: error
+
+  # The Pages site, by hand only (workflow_dispatch with `publish`): the new
+  # chart, and the download pages of the latest-dev pre-release as it
+  # stands. In the CI chain, ci.yml deploys the site itself, after
+  # publish-latest-dev (pages.yml).
+  pages:
+    name: publish chart (Pages)
+    needs: benchmark
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
+    with:
+      from_release: true

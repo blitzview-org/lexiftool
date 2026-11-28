@@ -1,0 +1,117 @@
+name: Pages
+
+# The repository's GitHub Pages site, https://<owner>.github.io/<repo>/:
+#
+#   index.html, benchmark.svg, benchmark-dark.svg, results.json
+#                      the performance comparison (tools/bench_report.lua,
+#                      from the run's benchmark-<sha> artifact)
+#   download/          the standalone executables, and
+#   capi/              the C API zips of the latest-dev pre-release: file,
+#                      size, SHA-256, direct link (tools/download_pages.lua)
+#
+# A deployment replaces the whole site, so every deployment builds all of
+# it. Reusable only, two callers:
+#   ci.yml             on master, after publish-latest-dev: the zips are the
+#                      run's artifacts, i.e. exactly the files that job has
+#                      just attached to latest-dev -- the links on the pages
+#                      resolve from the moment they go up
+#   benchmark.yml      started by hand with `publish`: a new chart; the zips
+#                      are fetched from the latest-dev pre-release as it
+#                      stands (from_release), the run itself publishes none
+#
+# Needs, once, in the repository settings: Pages -> Build and deployment ->
+# Source: GitHub Actions.
+
+on:
+  workflow_call:
+    inputs:
+      from_release:
+        description: take the zips from the published latest-dev pre-release instead of this run's artifacts
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  pages:
+    name: deploy
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment2.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7    # tools/download_pages.lua
+
+      - name: install Lua
+        run: sudo apt-get install -y --no-install-recommends lua5.4
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: benchmark-${{ github.sha }}
+          path: bench
+
+      - name: the zips, from this run
+        if: ${{ !inputs.from_release }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: lexiftool-*-${{ github.sha }}
+          merge-multiple: true
+          path: dist
+
+      - name: the zips, from the latest-dev pre-release
+        if: inputs.from_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download latest-dev -R "$GITHUB_REPOSITORY" -p 'lexiftool-*.zip' -D dist
+
+      - name: the site
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FROM_RELEASE: ${{ inputs.from_release }}
+        run: |
+          mkdir site
+          cp bench/index.html bench/benchmark.svg bench/benchmark-dark.svg bench/results.json site/
+          # the commit the zips were built from, and its date
+          if [ "$FROM_RELEASE" = true ]; then ref=latest-dev; else ref=$GITHUB_SHA; fi
+          info=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq '.sha + " " + .commit.committer.date')
+          commit=${info%% *} date=${info#* }
+          lua5.4 tools/download_pages.lua site \
+            --tag latest-dev --title "Development build" --commit "$commit" --date "$date" dist/*.zip
+          ls -lR site
+
+      - uses: actions/configure-pages@v6
+
+      # The artifact carries the attempt number: deploy-pages refuses a run
+      # with two artifacts of its name, which is what a re-run of this job
+      # leaves behind otherwise (the first attempt's upload stays).
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+          name: github-pages-${{ github.run_attempt }}
+
+      # Two tries: the artifact listing deploy-pages reads has been seen to
+      # lag behind the upload by a few seconds ("no artifacts named ...
+      # found", with the upload step green just before).
+      - id: deployment
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}
+
+      - if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+
+      - id: deployment2
+        if: steps.deployment.outcome == 'failure'
+        uses: actions/deploy-pages@v5
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}

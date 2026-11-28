@@ -1,0 +1,60 @@
+#!/usr/bin/env lua
+--------------------------------------------------------------------------------
+-- File:         bin/lexiftool
+--
+-- Description:  Command-line entry point, the counterpart of upstream's
+--               vendor/exiftool/exiftool script. It touches neither
+--               package.path nor package.cpath: whoever starts it provides
+--               the module paths --
+--                 - in a checkout: `. ./activate.sh` (LUA_PATH_5_x/
+--                   LUA_CPATH_5_x for src/, build/<ver>/ and the rock tree
+--                   of the Makefile's LUA_ROCKS), or the Makefile's
+--                   LUA_PATH/LUA_CPATH for its own targets;
+--                 - `make install`: the installed copy has its PREFIX/LIBDIR
+--                   paths baked in at the marker line below and runs as
+--                   `lua -E` (no LUA_PATH/LUA_CPATH/LUA_INIT);
+--                 - LuaRocks: the wrapper script it installs in the tree's
+--                   bin/ sets them. There is no identity to bake in as
+--                   with `make install`; the rockspec instead compiles its
+--                   version into lexiftool.util (define
+--                   LEXIFTOOL_ROCK_VERSION, util.rockVersion), from which
+--                   src/lexiftool.lua makes the port version that `-ver -v`
+--                   prints ("<rock version> (LuaRocks)").
+--               The "no package.path in code" rule (CONTRIBUTING.md
+--               "Configuration") holds here as everywhere else.
+--
+--               Bytecode: `lexiftool -ver -v` reports whether lexiftool.main
+--               was loaded from a binary chunk (`make install` lays the
+--               modules down as bytecode under their .lua names): require's
+--               second result is the file it came from, and a binary chunk
+--               starts with ESC.
+--------------------------------------------------------------------------------
+
+-- @@INSTALL@@ (`make install` puts the build's identity and the module paths here)
+
+-- This process owns its signals (it is the running CLI, not an embedding
+-- host): switch off the library's default of only recording $SIG{INT}/
+-- $SIG{CONT} (lexiftool.sys.nosignals, set before main.lua's module-level
+-- assignment installs the real handlers) -- doc/capi.md "Signals".
+-- lexiftool.sys is the first module loaded: when it cannot be, the module
+-- paths are not set up, and the message says so.
+local okSys, sys = pcall(require, 'lexiftool.sys')
+if not okSys then
+    io.stderr:write('lexiftool: ', tostring(sys), '\n',
+                    'lexiftool: the module paths are not set up (in a checkout: `make sys`,',
+                    ' then `. ./activate.sh`; see README.md "Starting lexiftool")\n')
+    os.exit(1)
+end
+sys.nosignals(false)
+
+local mainFn, mainFrom = require('lexiftool.main')
+local bytecode = false
+if type(mainFrom) == 'string' then
+    local f = io.open(mainFrom, 'rb')
+    if f then
+        bytecode = f:read(1) == '\27'
+        f:close()
+    end
+end
+
+os.exit(mainFn(arg, { bytecode = bytecode }))

@@ -1,0 +1,21 @@
+Time zone files for src/test/test_timezone_port.lua (section 4), which runs
+its child process with TZDIR set to one of these directories.
+
+They are zic output of the tz database (https://www.iana.org/time-zones,
+public domain):
+
+  slim/  zic -b slim: transitions up to the last rule change, later years
+         from the POSIX rule in the file's footer
+           America/New_York, Europe/Berlin
+           EST5EDT      (a link to America/New_York in the tz database)
+           posixrules   (America/New_York)
+  fat/   zic -b fat: transitions written out up to 2037
+           America/New_York, Europe/Berlin
+           posixrules   (America/New_York)
+         There is no EST5EDT here on purpose: the name is then read as a
+         POSIX TZ string that takes the transitions of posixrules, as on a
+         system that does not install the legacy zone names.
+
+The expected values in the test come from Perl with the same TZDIR, so the
+files must not be replaced by those of another tz release without
+regenerating them.
